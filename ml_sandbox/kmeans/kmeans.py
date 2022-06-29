@@ -8,6 +8,10 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.datasets import fetch_openml
 
+#TODO make this an actual package and do absolute paths
+from ..pca.pca import PCA
+
+
 FLOAT_ARR = npt.NDArray[np.float64]
 
 def l2_distance(x: FLOAT_ARR, clusters: FLOAT_ARR) -> FLOAT_ARR:

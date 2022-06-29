@@ -2,9 +2,12 @@ from typing import Tuple, List
 
 import numpy as np
 import numpy.typing as npt
+import matplotlib.pyplot as plt
+import scipy as sp
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
-from sklearn.datasets import load_wine
+from sklearn.datasets import load_digits
+from sklearn.datasets import load_iris
 
 FLOAT_ARR = npt.NDArray[np.float64]
 
@@ -22,7 +25,9 @@ def squared_mahalanobis_distance(
     Returns:
         Squared mahalanobis distance
     """
-    return np.matmul(np.matmul((points-mean).T, np.linalg.inv(covariance)), (points-mean))
+    identity = np.eye(len(covariance))
+    inv_covariance = sp.linalg.solve(covariance, identity, assume_a='pos')
+    return np.matmul(np.matmul((points-mean).T, inv_covariance), (points-mean))
 
 class MultivariateGaussian():
     """
@@ -32,9 +37,9 @@ class MultivariateGaussian():
         self.mean = mean
         self.covariance = covariance
 
-    def pdf(self, x: FLOAT_ARR):
+    def pdf(self, x: FLOAT_ARR) -> FLOAT_ARR:
         """
-        Return the probability of the input being part of this Gaussian.
+        Return the likelihood of the input being part of this Gaussian.
         For numerical convenice, this computation takes place in the log-scale
         and is then re-converted back
 
@@ -44,9 +49,9 @@ class MultivariateGaussian():
         Returns:
             probability
         """
-        return np.exp(self._logpdf(x))
+        return np.exp(self._log_likelihood(x))
 
-    def _logpdf(self, x: FLOAT_ARR) -> FLOAT_ARR:
+    def _log_likelihood(self, x: FLOAT_ARR) -> FLOAT_ARR:
         """
         Return the log probability of the input being part of this Gaussian.
 
@@ -59,18 +64,26 @@ class MultivariateGaussian():
 
         dims = self.mean.shape[-1]
         sq_mahalanobis_distance = squared_mahalanobis_distance(x, self.mean, self.covariance)
-        return -0.5 * (dims*np.log(2*np.pi) + np.log(np.linalg.det(self.covariance)) + sq_mahalanobis_distance)
+        return -0.5 * (np.log((2*np.pi)**dims * np.linalg.det(self.covariance)) + sq_mahalanobis_distance)
 
 class GMM():
     """
     Gaussian Mixture Model implementation based on the algorithm presented in Section 9.3
     of Pattern Recogntion and Machine Learning by Christopher Bishop
     """
-    def __init__(self, num_gaussians: int):
+    def __init__(self, num_gaussians: int, convergence_threshold: float=1e-6, covariance_reg: float=1e-6):
         self.num_gaussians = num_gaussians
         self.means = np.zeros(num_gaussians)
         self.mixture_coeffs = np.zeros(num_gaussians)
         self.covariances = np.zeros(num_gaussians)
+        self.covariance_reg = covariance_reg
+        self.convergence_threshold=convergence_threshold
+        self._log_likelihood_per_iter = []
+
+
+    @property
+    def log_likelihood_per_iter(self):
+        return self._log_likelihood_per_iter
 
     def fit(self, train_data: FLOAT_ARR) -> None:
         """
@@ -84,13 +97,14 @@ class GMM():
 
         self.means, self.covariances, self.mixture_coeffs = self._initialize_gmm(train_data)
         new_log_likelihood = self._log_likelihood(train_data)
-        while np.abs(new_log_likelihood - prev_log_likelihood) > 1e-6:
+        while np.abs(new_log_likelihood - prev_log_likelihood) > self.convergence_threshold:
             difference = np.abs(new_log_likelihood - prev_log_likelihood)
             print(f"=====Iteration {count}: Log Likelihood: {prev_log_likelihood}, Diff:{difference}=====")
             responsibilities = self._expectation_step(train_data)
             self.means, self.covariances, self.mixture_coeffs = self._maximization_step(train_data, responsibilities)
             prev_log_likelihood = new_log_likelihood
             new_log_likelihood = self._log_likelihood(train_data)
+            self._log_likelihood_per_iter.append(new_log_likelihood)
             count += 1
 
     def predict(self, test_data: FLOAT_ARR) -> FLOAT_ARR:
@@ -130,7 +144,7 @@ class GMM():
             responsibilities[i] = gaussian_pdfs / np.sum(gaussian_pdfs, axis=0)
         return responsibilities
 
-    def _maximization_step(self, train_data: FLOAT_ARR, responsibilities) -> Tuple[FLOAT_ARR, FLOAT_ARR, FLOAT_ARR]:
+    def _maximization_step(self, train_data: FLOAT_ARR, responsibilities: FLOAT_ARR) -> Tuple[FLOAT_ARR, FLOAT_ARR, FLOAT_ARR]:
         """
         Re-estimate the parameters using the current responsibilities
 
@@ -156,13 +170,13 @@ class GMM():
         Returns:
             Log-likelihood
         """
-        log_likelihood = []
+        likelihood = []
         for x in train_data:
             for j in range(self.num_gaussians):
                 gaussian = MultivariateGaussian(self.means[j], self.covariances[j])
                 gaussian_pdf = self.mixture_coeffs[j] * gaussian.pdf(x)
-                log_likelihood.append(np.log(gaussian_pdf))
-        return np.sum(log_likelihood)
+                likelihood.append(gaussian_pdf)
+        return np.sum(np.log(likelihood))
 
     def _update_means(self, train_data: FLOAT_ARR, responsibilities: FLOAT_ARR) -> FLOAT_ARR:
         """
@@ -193,11 +207,12 @@ class GMM():
         Returns:
             Updated covariance values
         """
+        identity_cov_reg = np.eye(updated_means.shape[-1])*self.covariance_reg
         points_per_cluster = responsibilities.sum(axis=0)
         covariances = []
         for i  in range(self.num_gaussians):
             new_cov = np.matmul((responsibilities[:, i][:, None]*(train_data - updated_means[i,:])).T, (train_data-updated_means[i,:]))
-            covariances.append(1/points_per_cluster[i] * new_cov)
+            covariances.append((1/points_per_cluster[i] * new_cov) + identity_cov_reg)
         return np.array(covariances)
 
     def _update_mixing_coefficients(self, responsibilities: FLOAT_ARR) -> FLOAT_ARR:
@@ -259,7 +274,8 @@ class GMM():
         Returns:
             array of covariances
         """
-        covariances = np.array([np.cov(split.T) for split in train_data_splits])
+        identity_cov_reg = np.eye(train_data_splits[0].shape[-1])*self.covariance_reg
+        covariances = np.array([np.cov(split.T)+identity_cov_reg for split in train_data_splits])
         return covariances
 
     def _initialize_mixing_coefficients(self) -> FLOAT_ARR:
@@ -277,10 +293,11 @@ class GMM():
 
 
 def main():
-    data_dict = load_wine()
+    data, targets = load_iris(return_X_y=True)
+    #data_dict = load_wine()
     
-    data = data_dict.data
-    targets = data_dict.target
+    #data = data_dict.data
+    #targets = data_dict.target
 
     X_train, X_test, y_train, y_test = train_test_split(data, targets, test_size=0.2)
     num_clusters = len(np.unique(y_train))
@@ -295,6 +312,8 @@ def main():
     print(predictions_test)
     test_accuracy = accuracy_score(y_test, predictions_test)
     print(f"Predictions on Test set: {test_accuracy}")
+    plt.plot(np.arange(len(gmm.log_likelihood_per_iter)), gmm.log_likelihood_per_iter)
+    plt.savefig("log_likelihood.png")
 
 if __name__ == '__main__':
     main()
