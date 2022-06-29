@@ -1,4 +1,4 @@
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 
 import numpy as np
 import numpy.typing as npt
@@ -7,7 +7,8 @@ import scipy as sp
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.datasets import load_digits
-from sklearn.datasets import load_iris
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
 
 FLOAT_ARR = npt.NDArray[np.float64]
 
@@ -37,7 +38,7 @@ class MultivariateGaussian():
         self.mean = mean
         self.covariance = covariance
 
-    def pdf(self, x: FLOAT_ARR) -> FLOAT_ARR:
+    def likelihood(self, x: FLOAT_ARR) -> FLOAT_ARR:
         """
         Return the likelihood of the input being part of this Gaussian.
         For numerical convenice, this computation takes place in the log-scale
@@ -71,13 +72,16 @@ class GMM():
     Gaussian Mixture Model implementation based on the algorithm presented in Section 9.3
     of Pattern Recogntion and Machine Learning by Christopher Bishop
     """
-    def __init__(self, num_gaussians: int, convergence_threshold: float=1e-6, covariance_reg: float=1e-6):
+    def __init__(self, num_gaussians: int, convergence_threshold: float=1e-6, 
+            covariance_reg: float=1e-6, init: Optional[str]=None
+        ) -> None:
         self.num_gaussians = num_gaussians
         self.means = np.zeros(num_gaussians)
         self.mixture_coeffs = np.zeros(num_gaussians)
         self.covariances = np.zeros(num_gaussians)
         self.covariance_reg = covariance_reg
         self.convergence_threshold=convergence_threshold
+        self._init = init
         self._log_likelihood_per_iter = []
 
 
@@ -120,11 +124,11 @@ class GMM():
         """
         predictions = []
         for x in test_data:
-            gaussian_pdfs = []
+            gaussian_likelihoods = []
             for j in range(self.num_gaussians):
                 gaussian = MultivariateGaussian(self.means[j], self.covariances[j])
-                gaussian_pdfs.append(self.mixture_coeffs[j] * gaussian.pdf(x))
-            predictions.append(np.argmax(gaussian_pdfs))
+                gaussian_likelihoods.append(self.mixture_coeffs[j] * gaussian.likelihood(x))
+            predictions.append(np.argmax(gaussian_likelihoods))
         return np.array(predictions)
 
     def _expectation_step(self, train_data: FLOAT_ARR) -> FLOAT_ARR:
@@ -136,12 +140,12 @@ class GMM():
         """
         responsibilities = np.zeros((train_data.shape[0], self.num_gaussians))
         for i, x in enumerate(train_data):
-            gaussian_pdfs = []
+            gaussian_likelihoods = []
             for j in range(self.num_gaussians):
                 gaussian = MultivariateGaussian(self.means[j], self.covariances[j])
-                gaussian_pdfs.append(self.mixture_coeffs[j] * gaussian.pdf(x))
-            gaussian_pdfs = np.array(gaussian_pdfs)
-            responsibilities[i] = gaussian_pdfs / np.sum(gaussian_pdfs, axis=0)
+                gaussian_likelihoods.append(self.mixture_coeffs[j] * gaussian.likelihood(x))
+            gaussian_likelihoods = np.array(gaussian_likelihoods)
+            responsibilities[i] = gaussian_likelihoods / np.sum(gaussian_likelihoods, axis=0)
         return responsibilities
 
     def _maximization_step(self, train_data: FLOAT_ARR, responsibilities: FLOAT_ARR) -> Tuple[FLOAT_ARR, FLOAT_ARR, FLOAT_ARR]:
@@ -174,8 +178,8 @@ class GMM():
         for x in train_data:
             for j in range(self.num_gaussians):
                 gaussian = MultivariateGaussian(self.means[j], self.covariances[j])
-                gaussian_pdf = self.mixture_coeffs[j] * gaussian.pdf(x)
-                likelihood.append(gaussian_pdf)
+                gaussian_likelihood = self.mixture_coeffs[j] * gaussian.likelihood(x)
+                likelihood.append(gaussian_likelihood)
         return np.sum(np.log(likelihood))
 
     def _update_means(self, train_data: FLOAT_ARR, responsibilities: FLOAT_ARR) -> FLOAT_ARR:
@@ -240,15 +244,39 @@ class GMM():
         Returns:
             Tuple of means, covariances, and mixing coefficients
         """
-        rng = np.random.default_rng()
-        rng.shuffle(train_data)
-        include = self.num_gaussians * (train_data.shape[0] // self.num_gaussians)
-        
-        splits = np.split(train_data[:include], self.num_gaussians)
+        if self._init:
+            means, covariances, mixture_coeffs = self._initialize_w_kmeans(train_data)
+        else:
+            rng = np.random.default_rng()
+            rng.shuffle(train_data)
+            include = self.num_gaussians * (train_data.shape[0] // self.num_gaussians)
+            
+            splits = np.split(train_data[:include], self.num_gaussians)
 
-        means = self._initialize_means(splits)
-        covariances = self._initialize_covariances(splits)
-        mixture_coeffs = self._initialize_mixing_coefficients()
+            means = self._initialize_means(splits)
+            covariances = self._initialize_covariances(splits)
+            mixture_coeffs = self._initialize_mixing_coefficients()
+        return means, covariances, mixture_coeffs
+
+    def _initialize_w_kmeans(self, train_data: np.ndarray) -> Tuple[FLOAT_ARR, FLOAT_ARR, FLOAT_ARR]:
+        kmeans = KMeans(self.num_gaussians)
+        kmeans.fit(train_data)
+        predictions = kmeans.predict(train_data)
+        clusters = np.unique(predictions)
+        identity_cov_reg = np.eye(train_data.shape[-1])*self.covariance_reg
+        means, covariances, mixture_coeffs = [], [], []
+        for c in clusters:
+            cluster_data = train_data[predictions==c]
+            cluster_mean = np.mean(cluster_data, axis=0)
+            cluster_cov = np.cov(cluster_data.T) + identity_cov_reg
+            cluster_coeff = len(cluster_data) / len(train_data)
+            means.append(cluster_mean)
+            covariances.append(cluster_cov)
+            mixture_coeffs.append(cluster_coeff)
+
+        means = np.array(means)
+        covariances = np.array(covariances)
+        mixture_coeffs = np.array(mixture_coeffs)
         return means, covariances, mixture_coeffs
 
     def _initialize_means(self, train_data_splits: List[FLOAT_ARR]) -> FLOAT_ARR:
@@ -293,16 +321,14 @@ class GMM():
 
 
 def main():
-    data, targets = load_iris(return_X_y=True)
-    #data_dict = load_wine()
+    data, targets = load_digits(return_X_y=True)
+    pca = PCA(0.99, whiten=True)
+    data = pca.fit_transform(data)
     
-    #data = data_dict.data
-    #targets = data_dict.target
-
     X_train, X_test, y_train, y_test = train_test_split(data, targets, test_size=0.2)
     num_clusters = len(np.unique(y_train))
 
-    gmm = GMM(num_clusters)
+    gmm = GMM(num_clusters, init="kmeans")
     gmm.fit(X_train)
     predictions_train = gmm.predict(X_train)
     print(predictions_train)

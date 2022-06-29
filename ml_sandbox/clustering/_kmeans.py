@@ -8,8 +8,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.datasets import fetch_openml
 
-#TODO make this an actual package and do absolute paths
-from ..pca.pca import PCA
 
 
 FLOAT_ARR = npt.NDArray[np.float64]
@@ -88,7 +86,7 @@ class KMeans():
             train_data: input training data
 
         Returns:
-            Tuplr of distane matrix and cluster assignments
+            Tuple of distance matrix and cluster assignments
         """
         distances = self._get_l2_distances(train_data)
         assignments = self._assign_points(distances)
